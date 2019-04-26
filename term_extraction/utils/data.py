@@ -1,20 +1,4 @@
 # -*- coding: utf-8 -*-
-# ---------------------------------
-#                      -----.
-#                   _.'__    `.
-#               .--(#)(##)---/#\
-#             .' @          /###\
-#             :         ,   #####
-#              `-..__.-' _.-\###/
-#                    `;_:    `"'
-#                  .'"""""`.
-#                 /,  神就 ,\
-#                #    是我!  \\
-#                `-._______.-'
-#                ___`. | .'___
-#               (______|______)
-# ----------------------------------
-
 import json, sys, os
 from copy import copy, deepcopy
 from utils.alphabet import Alphabet
@@ -28,7 +12,7 @@ class Data(object):
         self.data_ratio = (0.9, 0.05, 0.05)  # total 2000
         self.save_dir = './data/'
 
-        self.pos_as_feature = True
+        self.pos_as_feature = False
         self.use_char = True
 
         self.word_alphabet = Alphabet('word')
@@ -62,6 +46,7 @@ class Data(object):
         self.longSpan = True
         self.shortSpan = True
         self.termratio = 0.3
+        self.term_span = 5
 
         self.word_feature_extractor = "LSTM"  ## "LSTM"/"CNN"/"GRU"/
         self.char_feature_extractor = "CNN"  ## "LSTM"/"CNN"/"GRU"/None
@@ -84,7 +69,6 @@ class Data(object):
         self.pretrain_char_embedding = None
 
         # HP
-        self.term_span = 5
         self.HP_char_hidden_dim = 50
         self.HP_hidden_dim = 200
         self.HP_cnn_layer = 2
@@ -231,18 +215,11 @@ class Data(object):
         return
 
 
-
-
-
 if __name__ == '__main__':
-
     data = Data()
     data.load_data()
-
     print('data_ratio' in data.__dict__)
     print(data.__str__())
-    print(data.ptag_alphabet.__dict__)
-    print(data.word_alphabet.__dict__)
     print(data.char_alphabet.__dict__)
     print(data.label_ids_sent[0])
     print(data.word_ids_sent[0])

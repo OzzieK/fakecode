@@ -32,7 +32,6 @@ class WordSequence(nn.Module):
         else:
             lstm_hidden = data.HP_hidden_dim
 
-
         self.word_feature_extractor = data.word_feature_extractor
         if self.word_feature_extractor == "GRU":
             self.lstm = nn.GRU(self.input_size, lstm_hidden, num_layers=self.lstm_layer, batch_first=True, bidirectional=self.bilstm_flag)
@@ -87,7 +86,7 @@ class WordSequence(nn.Module):
             ## lstm_out (seq_len, seq_len, hidden_size)
             feature_out = self.droplstm(lstm_out.transpose(1, 0))
 
-        return feature_out
+        return feature_out, word_represent
 
 #
 # if __name__ == '__main__':

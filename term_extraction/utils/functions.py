@@ -7,6 +7,8 @@ from __future__ import absolute_import
 import sys
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 def normalize_word(word):
     new_word = ""
@@ -132,3 +134,50 @@ def reformat_input_data(batch_data, use_gpu=False, if_train=True):
 
     return word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask
 
+
+def masked_log_softmax(vector: torch.Tensor, mask: torch.Tensor, dim: int = -1, epsilon=1e-45) -> torch.Tensor:
+
+    vector = vector + (mask + epsilon).log()
+    return F.softmax(vector, dim=dim)
+
+
+class QueryAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(QueryAttention, self).__init__()
+        self.hiddenDim = hidden_dim
+        self.linear_in = nn.Linear(hidden_dim, hidden_dim)
+        self.tanh = nn.Tanh()
+        self.attSeq = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(True), nn.Linear(64, 1))
+
+    def forward(self, query, hidden_states):
+
+        if hidden_states.size(0) == 0:
+            return torch.zeros(self.hiddenDim)
+        query = self.linear_in(query)
+        attention_score = torch.matmul(hidden_states, query)
+        attention_score = F.softmax(attention_score, dim=0).view(hidden_states.size(0), 1)
+        scored_x = hidden_states * attention_score
+        condensed_x = torch.sum(scored_x, dim=0)
+        # condensed_x = self.tanh(condensed_x)
+        return condensed_x
+
+
+class MaskedQueryAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(MaskedQueryAttention, self).__init__()
+        self.hiddenDim = hidden_dim
+        self.linear_in = nn.Linear(hidden_dim, hidden_dim)
+        self.tanh = nn.Tanh()
+        self.linear_out = nn.Linear(2*hidden_dim, hidden_dim)
+        self.attSeq = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(True), nn.Linear(64, 1))
+
+    def forward(self, query, hidden_states, mask):
+
+        query = self.linear_in(query)
+        attention_score = torch.matmul(hidden_states, query)
+        mask = mask.float()
+        attention_score = masked_log_softmax(attention_score, mask=mask, dim=1).view((hidden_states.size(0), hidden_states.size(1), 1))
+        scored_x = hidden_states * attention_score
+        combined_x = torch.cat((hidden_states, scored_x), dim=-1)
+        condensed_x = self.linear_out(combined_x)
+        return condensed_x #, attention_score

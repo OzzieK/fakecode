@@ -22,7 +22,7 @@ from __future__ import absolute_import
 import torch.nn as nn
 from models.wordfeat.WordSeq import WordSequence
 from utils.data import Data
-from models.SpanSeq import reformat_input_data
+from utils.functions import *
 from copy import copy
 import torch
 import numpy as np
@@ -58,7 +58,7 @@ class MultiLabelSeq(nn.Module):
 
 
     def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, evaluating=False):
-        hidden_features = self.word_hidden_features(word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
+        hidden_features, word_rep = self.word_hidden_features(word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
         batch_size, max_seq_len = word_inputs.size()
         predicted_label_logits = self.hidden2labels(hidden_features)
         golden_labels = [bat_[1] for bat_ in batch_label]

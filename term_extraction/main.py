@@ -22,7 +22,6 @@
 
 
 from models.MultiLabelSeq import MultiLabelSeq
-from models.SpanSeq import SpanSequnce
 from utils.data import Data
 from utils.functions import reformat_input_data
 from copy import copy, deepcopy
