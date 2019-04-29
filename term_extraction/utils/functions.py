@@ -11,8 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from allennlp.modules.elmo import Elmo, batch_to_ids
 
-options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
 
 
 def normalize_word(word):
@@ -141,6 +139,12 @@ def reformat_input_data(batch_data, use_gpu=False, if_train=True):
 
     return word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask, sentTexts
 
+def random_embedding(vocab_size, embedding_dim):
+    pretrain_emb = np.empty([vocab_size, embedding_dim])
+    scale = np.sqrt(3.0 / embedding_dim)
+    for index in range(vocab_size):
+        pretrain_emb[index, :] = np.random.uniform(-scale, scale, [1, embedding_dim])
+    return pretrain_emb
 
 def masked_log_softmax(vector: torch.Tensor, mask: torch.Tensor, dim: int = -1, epsilon=1e-45) -> torch.Tensor:
 
@@ -189,18 +193,41 @@ class MaskedQueryAttention(nn.Module):
         condensed_x = self.linear_out(combined_x)
         return condensed_x #, attention_score
 
+class SeqAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(SeqAttention, self).__init__()
+        self.hiddenDim = hidden_dim
+        self.SeqWeight = nn.Parameter(torch.Tensor(np.random.randn(self.hiddenDim)))
+        self.attSeq = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(True), nn.Linear(64, 1))
+
+    def forward(self, hidden_states, mask):
+        # after this, we have (batch, dim1) with a diff weight per each cell
+        attention_hidden = hidden_states * self.SeqWeight
+        attention_score = self.attSeq(attention_hidden)
+        mask = mask.unsqueeze(-1).float()
+        attention_score = attention_score * mask
+        attention_score = masked_log_softmax(attention_score, mask, dim=1).view(hidden_states.size(0), hidden_states.size(1), 1)
+        scored_x = hidden_states * attention_score
+        condensed_x = torch.tanh(scored_x)
+        return condensed_x #, attention_score
+
+
 class getElmo(nn.Module):
-    def __init__(self, options_file, weight_file, layer=2, dropout=0.4, out_dim=100, training=True):
+    def __init__(self, layer=2, dropout=0, out_dim=100):
         super(getElmo, self).__init__()
-        dropout = dropout if training else 0
+        options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+        weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+        self.dropout = dropout
         self.Elmo = Elmo(options_file, weight_file, layer, dropout=dropout)
+        self.layers2one = nn.Linear(layer, 1)
         self.optLinear = nn.Linear(1024, out_dim)
 
     def forward(self, texts):
         word_idxs = batch_to_ids(texts)
         elmo_embs = self.Elmo.forward(word_idxs)
-        elmo_reps = elmo_embs['elmo_representations']
-
+        elmo_reps = torch.stack(elmo_embs['elmo_representations'], dim=-1)
+        elmo_decrease_layer = self.layers2one(elmo_reps).squeeze()
+        elmo_fit_hidden = self.optLinear(elmo_decrease_layer)
         mask = elmo_embs['mask']
 
-        return elmo_embs
+        return elmo_fit_hidden, mask

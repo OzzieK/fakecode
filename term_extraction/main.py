@@ -161,7 +161,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', help='Configuration File', default='None')
     parser.add_argument('--wordemb', help='Embedding for words', default='None')
     parser.add_argument('--charemb', help='Embedding for chars', default='None')
-    parser.add_argument('--model', help='Choose a model', choices=['spanc', 'multi'], default='spanc')
+    parser.add_argument('--model', help='Choose a model', choices=['spanc', 'multi', 'spanr'], default='spanc')
     parser.add_argument('--status', choices=['train', 'decode'], help='update algorithm', default='train')
     parser.add_argument('--savemodel', default="save/model/saved_model.lstm.")
     parser.add_argument('--savedset', help='Dir of saved data setting')
@@ -179,9 +179,13 @@ if __name__ == '__main__':
     # train_instances = instances[:train_ratio+1]
     # dev_instances = instances[train_ratio+1:dev_ratio+1]
     # test_instances = instances[dev_ratio+1:]
-    model = SpanRanking(data)
+
     if args.model == 'multi':
         model = MultiLabelSeq(data)
-    if args.model == 'spanc':
+    elif args.model == 'spanc':
         model = SpanClassfy(data)
+    elif args.model == 'spanr':
+        model = SpanRanking(data)
+    else:
+        raise ValueError("Unsupported model name, available options are ['spanc', 'multi', 'spanr']")
     train(data, model, train_ratio, dev_ratio)

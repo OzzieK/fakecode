@@ -33,6 +33,7 @@ from utils.data import Data
 from copy import copy
 import torch
 import torch.optim as optim
+from utils.functions import random_embedding
 from torch.autograd import Variable
 from random import shuffle
 
@@ -76,11 +77,12 @@ class SpanRanking(nn.Module):
         self.termRatio = data.termratio
         self.termWeight = nn.Parameter(torch.Tensor(np.random.randn(data.HP_hidden_dim)))
         self.termAttention = TermAttention(data.HP_hidden_dim)
+        self.pos_as_feature = data.pos_as_feature
         if self.pos_as_feature:
             self.pos_embedding_dim = data.pos_emb_dim
             self.pos_embedding = nn.Embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)
             self.pos_embedding.weight.data.copy_(
-                torch.from_numpy(self.random_embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)))
+                torch.from_numpy(random_embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)))
 
         self.spanEmb2Score = nn.Linear(data.HP_hidden_dim, 1)
         self.loss_fun = nn.SoftMarginLoss()

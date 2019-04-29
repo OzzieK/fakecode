@@ -69,7 +69,7 @@ class Data(object):
         self.norm_char_emb = False
         self.pretrain_word_embedding = None
         self.pretrain_char_embedding = None
-        self.use_elmo = False
+        self.use_elmo = True
 
         # HP
         self.HP_char_hidden_dim = 50
