@@ -76,6 +76,12 @@ class SpanRanking(nn.Module):
         self.termRatio = data.termratio
         self.termWeight = nn.Parameter(torch.Tensor(np.random.randn(data.HP_hidden_dim)))
         self.termAttention = TermAttention(data.HP_hidden_dim)
+        if self.pos_as_feature:
+            self.pos_embedding_dim = data.pos_emb_dim
+            self.pos_embedding = nn.Embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)
+            self.pos_embedding.weight.data.copy_(
+                torch.from_numpy(self.random_embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)))
+
         self.spanEmb2Score = nn.Linear(data.HP_hidden_dim, 1)
         self.loss_fun = nn.SoftMarginLoss()
 
@@ -95,14 +101,14 @@ class SpanRanking(nn.Module):
         spanPairs = []
         for canStarts, canEnds in zip(candidate_starts, candidate_ends):
             sentSpanPairs = []
-            for wordStart, wordEnds in zip(canStarts, canEnds):
-                tmp_spans = [(start, end+1) for start, end in zip(wordStart, wordEnds)]
+            for wordStarts, wordEnds in zip(canStarts, canEnds):
+                tmp_spans = [(start, end+1) for start, end in zip(wordStarts, wordEnds)]
                 tmp_spans = list(set(tmp_spans))
                 sentSpanPairs.extend(tmp_spans)
             spanPairs.append(sentSpanPairs)
         return spanPairs
 
-    def get_span_hiddens(self, hidden_states, span_pairs, seq_lengths):
+    def get_span_hiddens(self, wordReps, hidden_states, postags, span_pairs, seq_lengths):
         '''
         <pydoc>
         :param hidden_states: sequence token hidden states
@@ -118,6 +124,8 @@ class SpanRanking(nn.Module):
         '''
         assert len(hidden_states) == len(span_pairs)
         flat_Hiddens = []
+        flat_wordreps = []
+        flat_posembs = []
         flat_spanPairs = []
         flat_sentIds = []
         flat_spanSErep = []
@@ -126,10 +134,14 @@ class SpanRanking(nn.Module):
         sentence_slice = [[] for _ in range(sent_num)]
         spanPairID = 0
 
-        for sent_id, (seHiddens, sentPair, seqLen) in enumerate(zip(hidden_states, span_pairs, seq_lengths)):
+        for sent_id, (wordrep, seHiddens, postag, sentPair, seqLen) in enumerate(zip(wordReps, hidden_states, postags, span_pairs, seq_lengths)):
             sentHid = seHiddens[:seqLen]
+            wordrep_ = wordrep[:seqLen]
+            pos_embs = postag[:seqLen]
             for pairs in sentPair:
                 flat_Hiddens.append(sentHid[pairs[0]: pairs[1]])
+                flat_wordreps.append(wordrep_[pairs[0]:pairs[1]])
+                flat_posembs.append(pos_embs[pairs[0]: pairs[1]])
                 flat_spanSErep.append(torch.cat((sentHid[pairs[0]], sentHid[pairs[1]-1]), dim=0))
                 flat_sentIds.append(sent_id)
                 flat_spanPairs.append(pairs)
@@ -138,7 +150,7 @@ class SpanRanking(nn.Module):
                 spanPairID += 1
         # get span representation
         flat_spanRep = [self.termAttention(self.termWeight, wordSpan).unsqueeze(0) for wordSpan in flat_Hiddens]
-        return flat_Hiddens, flat_spanRep, flat_spanSErep, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num
+        return flat_Hiddens, flat_spanRep, flat_spanSErep, flat_posembs, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num
 
     def get_sentSliceResult(self, sentence_slice, results):
         sentSliceRes = []
@@ -152,15 +164,17 @@ class SpanRanking(nn.Module):
         ''''''
         golden_IDs = []
         goldenSentIDs = [[] for _ in range(len(sentSpanCandi))]
+        OOVSpan = 0
         for sentID, (gold_, candi_, canIDs) in enumerate(zip(golden_spans, sentSpanCandi, sentSlice)):
             for gold in gold_:
                 try:
                     tmp_ID = canIDs[candi_.index(gold)]
                 except ValueError:
+                    OOVSpan += 1
                     continue
                 golden_IDs.append(tmp_ID)
                 goldenSentIDs[sentID].append(tmp_ID)
-        return golden_IDs, goldenSentIDs
+        return golden_IDs, goldenSentIDs, OOVSpan
 
     def reformat_labels(self, golden_labels):
         ''''''
@@ -177,18 +191,18 @@ class SpanRanking(nn.Module):
     def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, training=True):
 
         hidden_features, word_rep = self.word_hidden_features(word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
+        pos_embs = self.pos_embedding(pos_inputs)
         golden_labels = [bat_[0] for bat_ in batch_label]
         assert len(word_inputs) == len(golden_labels)
         spanPairs = self.get_candidate_span_pairs(seq_lengths=word_seq_lengths)
         golden_spans, golden_class, golden_term_num = self.reformat_labels(golden_labels)
-
-        flat_Hiddens, flat_spanRep, flat_spanSErep, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num = \
-            self.get_span_hiddens(hidden_features, spanPairs, word_seq_lengths)
+        flat_Hiddens, flat_spanRep, flat_spanSErep, flat_posembs, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num \
+            = self.get_span_hiddens(word_rep, hidden_features, pos_embs, spanPairs, word_seq_lengths)
         termScores = self.spanEmb2Score(torch.cat(flat_spanRep, dim=0))
 
         sentence_span_score = self.get_sentSliceResult(sentence_slice, termScores)
         sentence_span_candidate = self.get_sentSliceResult(sentence_slice, flat_spanPairs)
-        flat_golden_indexes, sent_gold_indexes = self.getGoldIndex(golden_spans, sentence_span_candidate, sentence_slice)
+        flat_golden_indexes, sent_gold_indexes, oovNum = self.getGoldIndex(golden_spans, sentence_span_candidate, sentence_slice)
         flat_wrong_indexes = list(set(range(len(flat_spanPairs))) - set(flat_golden_indexes))
 
         sorted_score, reindex = termScores.sort(0, descending=True)
@@ -207,7 +221,7 @@ class SpanRanking(nn.Module):
         wrong_target = torch.zeros(len(flat_wrong_indexes), dtype=torch.float)
         loss = self.loss_fun(torch.cat((gold_score, wrong_score), dim=0).view(-1), torch.cat((gold_target, wrong_target), dim=0).view(-1))
         print(loss, precision)
-        return loss
+        return loss, precision
 
 if __name__ == '__main__':
     

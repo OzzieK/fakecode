@@ -57,7 +57,7 @@ class MultiLabelSeq(nn.Module):
         return vectors
 
 
-    def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, evaluating=False):
+    def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, sent_text, evaluating=False):
         hidden_features, word_rep = self.word_hidden_features(word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
         batch_size, max_seq_len = word_inputs.size()
         predicted_label_logits = self.hidden2labels(hidden_features)

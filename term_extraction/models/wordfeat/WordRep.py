@@ -51,6 +51,7 @@ class WordRep(nn.Module):
         if self.pos_as_feature:
             self.pos_embedding_dim = data.pos_emb_dim
             self.pos_embedding = nn.Embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)
+            self.pos_embedding.weight.data.copy_(torch.from_numpy(self.random_embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)))
 
         if self.gpu:
             self.drop = self.drop.cuda()

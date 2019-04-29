@@ -9,6 +9,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from allennlp.modules.elmo import Elmo, batch_to_ids
+
+options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+
 
 def normalize_word(word):
     new_word = ""
@@ -84,6 +89,7 @@ def reformat_input_data(batch_data, use_gpu=False, if_train=True):
     chars = [inst[1] for inst in batch_data]
     pos_tags = [inst[2] for inst in batch_data]
     labels = [inst[3] for inst in batch_data]
+    sentTexts = [inst[4] for inst in batch_data]
     # span_label = [label[0] for label in labels]
     # sequ_label = [label[1] for label in labels]
     word_seq_lengths = torch.LongTensor(list(map(len, words)))
@@ -112,6 +118,7 @@ def reformat_input_data(batch_data, use_gpu=False, if_train=True):
     word_seq_tensor = word_seq_tensor[word_perm_idx]
     pos_seq_tensor = pos_seq_tensor[word_perm_idx]
     labels = [labels[idx] for idx in word_perm_idx]
+    sentTexts = [sentTexts[idx] for idx in word_perm_idx]
     mask = mask[word_perm_idx]
 
     char_seq_tensor = char_seq_tensor[word_perm_idx].view(batch_size * max_seq_len, -1)
@@ -132,7 +139,7 @@ def reformat_input_data(batch_data, use_gpu=False, if_train=True):
     #     char_seq_tensor = char_seq_tensor.cuda()
     #     char_seq_recover = char_seq_recover.cuda()
 
-    return word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask
+    return word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask, sentTexts
 
 
 def masked_log_softmax(vector: torch.Tensor, mask: torch.Tensor, dim: int = -1, epsilon=1e-45) -> torch.Tensor:
@@ -181,3 +188,19 @@ class MaskedQueryAttention(nn.Module):
         combined_x = torch.cat((hidden_states, scored_x), dim=-1)
         condensed_x = self.linear_out(combined_x)
         return condensed_x #, attention_score
+
+class getElmo(nn.Module):
+    def __init__(self, options_file, weight_file, layer=2, dropout=0.4, out_dim=100, training=True):
+        super(getElmo, self).__init__()
+        dropout = dropout if training else 0
+        self.Elmo = Elmo(options_file, weight_file, layer, dropout=dropout)
+        self.optLinear = nn.Linear(1024, out_dim)
+
+    def forward(self, texts):
+        word_idxs = batch_to_ids(texts)
+        elmo_embs = self.Elmo.forward(word_idxs)
+        elmo_reps = elmo_embs['elmo_representations']
+
+        mask = elmo_embs['mask']
+
+        return elmo_embs

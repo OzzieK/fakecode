@@ -22,6 +22,8 @@
 
 
 from models.MultiLabelSeq import MultiLabelSeq
+from models.SpanClassify import SpanClassfy
+from models.SpanRanking import  SpanRanking
 from utils.data import Data
 from utils.functions import reformat_input_data
 from copy import copy, deepcopy
@@ -77,15 +79,14 @@ def evaluate(data, instances, model, name='eval'):
         if not instance:
             continue
         batch_words, batch_pos, batch_sent_lens, batch_sents_recover, batch_char_seqs, batch_char_lens,\
-        batch_char_recover, labels, mask = reformat_input_data(instance, use_gpu=False, if_train=False)
-        loss, accuracy = model.forward(batch_words, batch_pos, batch_sent_lens, batch_char_seqs, batch_char_lens, batch_char_recover, labels, mask)
+        batch_char_recover, labels, mask, sent_texts = reformat_input_data(instance, use_gpu=False, if_train=False)
+        loss, accuracy = model.forward(batch_words, batch_pos, batch_sent_lens, batch_char_seqs, batch_char_lens, batch_char_recover, labels, mask, sent_texts)
         total_loss += loss.item()
         total_accuracy += accuracy.item()
     return total_loss/total_batches, total_accuracy/total_batches
 
-def train(data, tratioNum, dratioNum):
+def train(data, model, tratioNum, dratioNum):
     print("Training Model ... ")
-    model = MultiLabelSeq(data)
     if data.optimizer.lower() == "sgd":
         optimizer = optim.SGD(model.parameters(), lr=data.HP_lr, momentum=data.HP_momentum, weight_decay=data.HP_l2)
     elif data.optimizer.lower() == "adagrad":
@@ -133,9 +134,9 @@ def train(data, tratioNum, dratioNum):
                 continue
             batch_words_seq, batch_pos_seq, batch_seq_lengths, batch_seq_recover, batch_char_seq, \
             batch_char_seq_lengths, batch_char_seq_recover, batch_labels, \
-            batch_mask = reformat_input_data(batch_instance, data.HP_gpu, True)
+            batch_mask, batch_texts = reformat_input_data(batch_instance, data.HP_gpu, True)
             instance_count += 1
-            loss, accuracy = model.forward(batch_words_seq, batch_pos_seq, batch_seq_lengths, batch_char_seq, batch_char_seq_lengths, batch_char_seq_recover, batch_labels, batch_mask)
+            loss, accuracy = model.forward(batch_words_seq, batch_pos_seq, batch_seq_lengths, batch_char_seq, batch_char_seq_lengths, batch_char_seq_recover, batch_labels, batch_mask, batch_texts)
 
             sample_loss += loss.item()
             total_loss += loss.item()
@@ -160,14 +161,10 @@ if __name__ == '__main__':
     parser.add_argument('--config', help='Configuration File', default='None')
     parser.add_argument('--wordemb', help='Embedding for words', default='None')
     parser.add_argument('--charemb', help='Embedding for chars', default='None')
+    parser.add_argument('--model', help='Choose a model', choices=['spanc', 'multi'], default='spanc')
     parser.add_argument('--status', choices=['train', 'decode'], help='update algorithm', default='train')
     parser.add_argument('--savemodel', default="save/model/saved_model.lstm.")
     parser.add_argument('--savedset', help='Dir of saved data setting')
-    parser.add_argument('--train', default="data/conll03/train.bmes")
-    parser.add_argument('--dev', default="data/conll03/dev.bmes")
-    parser.add_argument('--test', default="data/conll03/test.bmes")
-    parser.add_argument('--seg', default="True")
-    parser.add_argument('--raw')
     parser.add_argument('--loadmodel')
     parser.add_argument('--output')
     args = parser.parse_args()
@@ -182,4 +179,9 @@ if __name__ == '__main__':
     # train_instances = instances[:train_ratio+1]
     # dev_instances = instances[train_ratio+1:dev_ratio+1]
     # test_instances = instances[dev_ratio+1:]
-    train(data, train_ratio, dev_ratio)
+    model = SpanRanking(data)
+    if args.model == 'multi':
+        model = MultiLabelSeq(data)
+    if args.model == 'spanc':
+        model = SpanClassfy(data)
+    train(data, model, train_ratio, dev_ratio)

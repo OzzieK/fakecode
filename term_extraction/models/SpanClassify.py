@@ -35,7 +35,11 @@ import torch
 import torch.optim as optim
 from torch.autograd import Variable
 from random import shuffle
-from utils.functions import masked_log_softmax, MaskedQueryAttention
+from utils.functions import masked_log_softmax, MaskedQueryAttention, getElmo
+from allennlp.modules.elmo import Elmo, batch_to_ids
+options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+
 
 class SelfAttention(nn.Module):
     def __init__(self, hidden_dim):
@@ -47,10 +51,8 @@ class SelfAttention(nn.Module):
             nn.Linear(64, 1))
 
     def forward(self, hidden_states):
-        # (B, L, H) -> (B , L, 1)
         energy = self.attSeq(hidden_states)
         weights = F.softmax(energy.squeeze(-1), dim=0)
-        # (B, L, H) * (B, L, 1) -> (B, H)
         outputs = (hidden_states * weights.unsqueeze(-1)).sum(dim=0)
         return outputs, weights
 
@@ -94,30 +96,48 @@ class SeqAttention(nn.Module):
 class SpanClassfy(nn.Module):
     def __init__(self, data):
         super(SpanClassfy, self).__init__()
-        print('build span ranking model ...')
+        print('build span classifying model ...')
         print('use_char: ', data.use_char)
         if data.use_char:
             print('char feature extractor: ', data.char_feature_extractor)
         print('word feature extractor: ', data.word_feature_extractor)
         self.gpu = data.HP_gpu
-        self.longSpan = data.longSpan
-        self.shortSpan = data.shortSpan
+
         self.hiddenDim = data.HP_hidden_dim
         self.average_batch = data.average_batch_loss
         self.word_hidden_features = WordSequence(data)
-        self.classNum = data.label_alphabet_size
+        # self.classNum = data.label_alphabet_size
         self.max_span = data.term_span
         self.termRatio = data.termratio
-        self.termAttention = TermAttention(data.HP_hidden_dim)
         self.SeqAttention = SeqAttention(data.HP_hidden_dim)
         self.asaquery = nn.Parameter(torch.Tensor(np.random.randn(self.hiddenDim)))
         self.asa = MaskedQueryAttention(data.HP_hidden_dim)
-        self.spanEmb2Score = nn.Linear(data.HP_hidden_dim, 2)
-        self.loss_fun = nn.CrossEntropyLoss()
+        self.feature_dim = data.HP_hidden_dim * 3
         self.pos_as_feature = data.pos_as_feature
+        self.termAttention = TermAttention(data.HP_hidden_dim+data.pos_emb_dim) if self.pos_as_feature else TermAttention(data.HP_hidden_dim)
+        self.pos_embedding_dim = data.pos_emb_dim
+        self.loss_fun = nn.CrossEntropyLoss()
+
+        self.useSpanLen = data.useSpanLen
         if self.pos_as_feature:
-            self.pos_embedding_dim = data.pos_emb_dim
+            self.feature_dim += data.pos_emb_dim * 4
             self.pos_embedding = nn.Embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)
+            self.pos_embedding.weight.data.copy_(
+                torch.from_numpy(self.random_embedding(data.ptag_alphabet.size(), self.pos_embedding_dim)))
+        if self.useSpanLen:
+            self.feature_dim += data.spamEm_dim
+            self.spanLenemb = nn.Embedding(self.max_span+1, data.spamEm_dim)
+            self.spanLenemb.weight.data.copy_(torch.from_numpy(self.random_embedding(self.max_span+1, data.spamEm_dim)))
+
+        self.spanEmb2Score = nn.Sequential(nn.Linear(self.feature_dim, self.hiddenDim), nn.ReLU(True), nn.Linear(self.hiddenDim, 2))
+        self.posSeq2Vec = nn.Linear(data.pos_emb_dim * self.max_span, data.pos_emb_dim)
+
+    def random_embedding(self, vocab_size, embedding_dim):
+        pretrain_emb = np.empty([vocab_size, embedding_dim])
+        scale = np.sqrt(3.0 / embedding_dim)
+        for index in range(vocab_size):
+            pretrain_emb[index, :] = np.random.uniform(-scale, scale, [1, embedding_dim])
+        return pretrain_emb
 
     def get_candidate_span_pairs(self, seq_lengths):
         ''''''
@@ -129,31 +149,88 @@ class SpanClassfy(nn.Module):
         spanPairs = []
         for canStarts, canEnds in zip(candidate_starts, candidate_ends):
             sentSpanPairs = []
-            for wordStart, wordEnds in zip(canStarts, canEnds):
-                tmp_spans = [(start, end+1) for start, end in zip(wordStart, wordEnds)]
+            for wordStarts, wordEnds in zip(canStarts, canEnds):
+                tmp_spans = [(start, end+1) for start, end in zip(wordStarts, wordEnds)]
                 tmp_spans = list(set(tmp_spans))
                 sentSpanPairs.extend(tmp_spans)
             spanPairs.append(sentSpanPairs)
         return spanPairs
 
-    def get_span_hiddens(self, hidden_states, span_pairs, seq_lengths):
-        assert len(hidden_states) == len(span_pairs)
-        spanHiddens = []
-        for seHiddens, sentPair, seqLen in zip(hidden_states, span_pairs, seq_lengths):
-            sentUnit = []
+    def get_span_hiddens(self, wordReps, hidden_states, postags, span_pairs, seq_lengths):
+        '''
+        <pydoc>
+        :param hidden_states: sequence token hidden states
+        :param span_pairs: the candidate span pairs of each sentence
+        :param seq_lengths: the length of each sentence
+        :return: flat_Hiddens: the hidden slice of each span pair, [span_num, n*hidden_dim]\
+                 flat_spanRep: the vector representation of each span, [span_num, hidden_dim]\
+                 flat_spanSErep: the vector that contains just the begin and end word of a span, [span_num, 2*hidden_dim]\
+                 flat_spanPairs: the flattened span pairs, [span_num]\
+                 flat_spanLens: the length of each span pair, [span_num]\
+                 flat_sentIds: corresponsing sentence IDs of the span pair, [span_num]\
+                 sent_num: total sentence number, int [or batch_size]
+        '''
+        assert hidden_states.size(0) == len(span_pairs)
+        flat_Hiddens = []
+        flat_wordreps = []
+        flat_posembs = []
+        flat_spanPairs = []
+        flat_sentIds = []
+        flat_spanSErep = []
+        flat_spanLens = []
+        sent_num = len(span_pairs)
+        sentence_slice = [[] for _ in range(sent_num)]
+        spanPairID = 0
+        pad_pos = torch.zeros(self.pos_embedding_dim)
+        for sent_id, (wordrep, seHiddens, postag, sentPair, seqLen) in enumerate(zip(wordReps, hidden_states, postags, span_pairs, seq_lengths)):
             sentHid = seHiddens[:seqLen]
+            wordrep_ = wordrep[:seqLen]
+            pos_embs = postag[:seqLen]
             for pairs in sentPair:
-                sentUnit.append(sentHid[pairs[0]: pairs[1]])
-            spanHiddens.append(sentUnit)
-        return spanHiddens
+                flat_Hiddens.append(sentHid[pairs[0]: pairs[1]])
+                flat_wordreps.append(wordrep_[pairs[0]:pairs[1]])
+                if pairs[1] - pairs[0] == self.max_span:
+                    flat_posembs.append(pos_embs[pairs[0]: pairs[1]].view(-1))
+                else:
+                    flat_posembs.append(torch.cat((pos_embs[pairs[0]: pairs[1]].view(-1), pad_pos.repeat(self.max_span + pairs[0] - pairs[1])), dim=-1))
+                flat_spanSErep.append(torch.cat((sentHid[pairs[0]], sentHid[pairs[1]-1]), dim=0).unsqueeze(0))
+                flat_sentIds.append(sent_id)
+                flat_spanPairs.append(pairs)
+                flat_spanLens.append(pairs[1]-pairs[0])
+                sentence_slice[sent_id].append(spanPairID)
+                spanPairID += 1
+        # get span representation
+        flat_spanRep = [self.termAttention(wordSpan).unsqueeze(0) for wordSpan in flat_Hiddens]
+        flat_spanRep = torch.cat(flat_spanRep, dim=0)
+        flat_posembs = [self.posSeq2Vec(pos_seq).unsqueeze(0) for pos_seq in flat_posembs]
+        flat_posembs = torch.cat(flat_posembs, dim=0)
+        flat_spanSErep = torch.cat(flat_spanSErep, dim=0)
 
-    def get_span_emb(self, spanHiddens):
+        return flat_Hiddens, flat_spanRep, flat_spanSErep, flat_posembs, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num
+
+    def get_sentSliceResult(self, sentence_slice, results):
+        sentSliceRes = []
+        for itm in sentence_slice:
+            start = itm[0]
+            end = itm[-1]
+            sentSliceRes.append(results[start:end+1])
+        return sentSliceRes
+
+    def getGoldIndex(self, golden_spans, sentSpanCandi, sentSlice):
         ''''''
-        SpamEmb = []
-        for sentence in spanHiddens:
-            sentSpanEmb = [self.termAttention(wordSpan) for wordSpan in sentence]
-            SpamEmb.append(sentSpanEmb)
-        return SpamEmb
+        golden_IDs = []
+        goldenSentIDs = [[] for _ in range(len(sentSpanCandi))]
+        OOVSpan = 0
+        for sentID, (gold_, candi_, canIDs) in enumerate(zip(golden_spans, sentSpanCandi, sentSlice)):
+            for gold in gold_:
+                try:
+                    tmp_ID = canIDs[candi_.index(gold)]
+                except ValueError:
+                    OOVSpan += 1
+                    continue
+                golden_IDs.append(tmp_ID)
+                goldenSentIDs[sentID].append(tmp_ID)
+        return golden_IDs, goldenSentIDs, OOVSpan
 
     def get_term_score(self, span_embs):
         ''''''
@@ -181,48 +258,59 @@ class SpanClassfy(nn.Module):
         return torch.cat(tmp, dim=0)
 
 
-    def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, training=True):
+    def forward(self, word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask, sent_texts, training=True):
         hidden_features, word_rep = self.word_hidden_features(word_inputs, pos_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
         hidden_features = self.asa(self.asaquery, hidden_features, mask)
         # hidden_features = self.SeqAttention(hidden_features, mask)
-        features = []
-        features.append(hidden_features)
+        span_features = []
+        span_features.append(hidden_features)
+        pos_embs = self.pos_embedding(pos_inputs)
         if self.pos_as_feature:
-            features.append(self.pos_embedding(pos_inputs))
-
+            span_features.append(pos_embs)
+        hidden_features = torch.cat(span_features, dim=-1)
         golden_labels = [bat_[0] for bat_ in batch_label]
+        # get candidate start id and end id pair
         spanPairs = self.get_candidate_span_pairs(seq_lengths=word_seq_lengths)
+
         golden_spans, golden_class, golden_term_num = self.reformat_labels(golden_labels)
-        gold_span_hidden = self.get_span_hiddens(hidden_features, golden_spans, word_seq_lengths)
-        gold_span_emb = self.get_span_emb(gold_span_hidden)
-        gold_span_score = self.get_term_score(gold_span_emb)
-        flatted_gold = self.flatted_list(gold_span_score)
-        gold_predicted = torch.argmax(flatted_gold, dim=1)
-        gold_right = gold_predicted.eq(1).sum().float()  # tp
-        false_nega = flatted_gold.size()[0] - gold_right # false negative
-        flatted_gold_soft = F.softmax(flatted_gold, dim=1)
-        gold_target = torch.ones(flatted_gold_soft.size()[0], dtype=torch.long)
-        gold_loss = self.loss_fun(flatted_gold, gold_target)
-        neg_samples = []
-        for AAA, BBB, CCC in zip(spanPairs, golden_spans, golden_term_num):
-            neg_samples.append(list(set(AAA) - set(BBB)))
-        neg_span_hidden = self.get_span_hiddens(hidden_features, neg_samples, word_seq_lengths)
-        neg_span_emb = self.get_span_emb(neg_span_hidden)
-        neg_span_score = self.get_term_score(neg_span_emb)
-        flatted_nega = self.flatted_list(neg_span_score)
-        nega_predicted = torch.argmax(flatted_nega, dim=1)
-        nega_right = nega_predicted.eq(0).sum().float() # true negative
-        false_gold = flatted_nega.size()[0] - nega_right
-        nega_target = torch.zeros(flatted_nega.size()[0], dtype=torch.long)
-        nega_loss = self.loss_fun(flatted_nega, nega_target)
-        flatted_nega_soft = F.softmax(flatted_nega, dim=1)
-        accuracy = (gold_right+nega_right)/(gold_predicted.size(0)+nega_predicted.size()[0])
+
+        flat_Hiddens, flat_spanRep, flat_spanSErep, flat_posembs, flat_spanPairs, flat_spanLens, flat_sentIds, sentence_slice, sent_num\
+            = self.get_span_hiddens(word_rep, hidden_features, pos_embs, spanPairs, word_seq_lengths)
+        lenEmbeddings = self.spanLenemb(torch.Tensor(flat_spanLens).long())
+        spanEmbs = [flat_spanSErep, flat_spanRep, flat_posembs]
+        if self.useSpanLen:
+            spanEmbs.append(lenEmbeddings)
+        spanEmbs = torch.cat(spanEmbs, dim=-1)
+
+        sentence_span_candidate = self.get_sentSliceResult(sentence_slice, flat_spanPairs)
+        flat_golden_indexes, sent_gold_indexes, oovNum = self.getGoldIndex(golden_spans, sentence_span_candidate,
+                                                                   sentence_slice)
+        flat_neg_indexes = list(set(range(len(flat_spanPairs))) - set(flat_golden_indexes))
+
+        spanClasses = self.spanEmb2Score(spanEmbs)
+
+        gold_span_classes = spanClasses[flat_golden_indexes]
+        nega_span_classes = spanClasses[flat_neg_indexes]
+
+        gold_targets = torch.ones((gold_span_classes.size(0)), dtype=torch.long)
+        nega_targets = torch.zeros((nega_span_classes.size(0)), dtype=torch.long)
+
+        # the negative samples are too much times of the golden, so we'd better calculate them separately
+        gold_loss = self.loss_fun(gold_span_classes, gold_targets)
+        nega_loss = self.loss_fun(nega_span_classes, nega_targets)
+
+        loss = gold_loss + nega_loss
+
+        PredResults = torch.argmax(spanClasses, dim=-1)
+        postivePred = PredResults.eq(1).sum().float()
+        wrghtPred = PredResults[flat_golden_indexes].sum().float()
+        precision = wrghtPred / postivePred
+        recall = wrghtPred / float(len(flat_golden_indexes))
+        print(loss, postivePred, wrghtPred, precision, recall)
+
         # filtering
 
-
-        print(nega_loss+gold_loss, gold_right/gold_predicted.size(0), nega_right/nega_predicted.size()[0], accuracy, gold_predicted.size()[0], nega_predicted.size()[0]-nega_right)
-
-        return nega_loss+gold_loss
+        return loss, precision
 
 if __name__ == '__main__':
     
@@ -235,10 +323,10 @@ if __name__ == '__main__':
         for idx in range(len(instances)//100):
             batched = instances[idx*100:(idx+1)*100]
             span_seq.train()
-            word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask = reformat_input_data(
+            word_seq_tensor, pos_seq_tensor, word_seq_lengths, word_seq_recover, char_seq_tensor, char_seq_lengths, char_seq_recover, labels, mask, sentTexts = reformat_input_data(
                 batched, use_gpu=True)
             reps = span_seq(word_seq_tensor, pos_seq_tensor, word_seq_lengths, char_seq_tensor, char_seq_lengths,
-                            char_seq_recover, labels, mask)
+                            char_seq_recover, labels, mask, sent_texts=sentTexts)
             reps.backward()
             optimizer.step()
             span_seq.zero_grad()

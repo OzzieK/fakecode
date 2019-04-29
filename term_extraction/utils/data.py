@@ -8,11 +8,12 @@ import pickle as pkl
 
 class Data(object):
     def __init__(self):
-        self.data_dir = './../data/gene_term_format_by_sentence.json'
+        self.data_dir = './data/gene_term_format_by_sentence.json'
         self.data_ratio = (0.9, 0.05, 0.05)  # total 2000
         self.save_dir = './data/'
 
-        self.pos_as_feature = False
+        self.pos_as_feature = True
+        self.useSpanLen = True
         self.use_char = True
 
         self.word_alphabet = Alphabet('word')
@@ -62,15 +63,17 @@ class Data(object):
         self.char_emb_dir = None
         self.word_emb_dim = 50
         self.char_emb_dim = 30
-        self.pos_emb_dim = 20
+        self.pos_emb_dim = 30
+        self.spamEm_dim = 30
         self.norm_word_emb = False
         self.norm_char_emb = False
         self.pretrain_word_embedding = None
         self.pretrain_char_embedding = None
+        self.use_elmo = False
 
         # HP
         self.HP_char_hidden_dim = 50
-        self.HP_hidden_dim = 200
+        self.HP_hidden_dim = 150
         self.HP_cnn_layer = 2
         self.HP_batch_size = 100
         self.HP_epoch = 100
@@ -169,7 +172,7 @@ class Data(object):
             self.tag_ids_sent.append(self.ptag_alphabet.get_indexs(ptag))
             term_truple = [[term[0], term[1], self.label_alphabet.get_index(term[2])] for term in term_truple]
             self.label_ids_sent.append(term_truple)
-            all_instances.append([self.word_ids_sent[-1], sent_char_ids, self.tag_ids_sent[-1], [term_truple, seqLabel_ids]])
+            all_instances.append([self.word_ids_sent[-1], sent_char_ids, self.tag_ids_sent[-1], [term_truple, seqLabel_ids], sent_text])
         return all_instances
 
     def reformat_label(self, words, terms):
